@@ -116,7 +116,6 @@ class TestAllNodesBase(unittest.IsolatedAsyncioTestCase):
 
     @classmethod
     def setUpClass(cls):
-
         def get_all_nodes_classes(shelf: fn.Shelf, current=None):
             if current is None:
                 current = []
@@ -168,5 +167,5 @@ class TestAllNodesBase(unittest.IsolatedAsyncioTestCase):
         # Final assertion to ensure all nodes were tested
         if cls.nodes_to_test:
             raise AssertionError(
-                f"These nodes were not tested ({ len(cls.nodes_to_test) }): { cls.nodes_to_test}"
+                f"These nodes were not tested ({len(cls.nodes_to_test)}): {cls.nodes_to_test}"
             )

@@ -8,8 +8,10 @@ import funcnodes_storage as fnmodule  # noqa
 sys.path.append(
     os.path.dirname(os.path.abspath(__file__))
 )  # in case test folder is not in sys path
-from all_nodes_test_base import TestAllNodesBase # noqa: E402
+from all_nodes_test_base import TestAllNodesBase  # noqa: E402
+
 fn.config.IN_NODE_TEST = True
+import test_sql  # noqa: E402
 
 
 class TestAllNodes(TestAllNodesBase):
@@ -20,17 +22,13 @@ class TestAllNodes(TestAllNodesBase):
     # but this will also mean if you run all tests these tests might run multiple times
     # also the correspondinig setups and teardowns will not be called, so the tests should be
     # independently callable
-    sub_test_classes: List[unittest.IsolatedAsyncioTestCase] = []
+    sub_test_classes: List[unittest.IsolatedAsyncioTestCase] = [
+        test_sql.TestSql,
+        test_sql.TestSqlBuilder,
+    ]
 
     # if you have specific nodes you dont want to test, add them here
     # But why would you do that, it will ruin the coverage?!
     # a specific use case would be ignore nodes that e.g. load a lot of data, but there we would recommend
     # to write tests with patches and not ignore them.
     ignore_nodes: List[fn.Node] = []
-
-
-    async def test_first_node(self):
-        node = fnmodule.FirstNode()
-        node.inputs["x"].value = "foo"
-        await node
-        self.assertEqual(node.get_output("out").value, "bar")
