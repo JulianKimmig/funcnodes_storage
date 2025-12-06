@@ -201,6 +201,33 @@ class TestSql(IsolatedAsyncioTestCase):
         rec_node.inputs["value"].value = 5.5
         await run_until_complete(rec_node)
 
+    async def test_add_dict(self):
+        con_node = sql.SQLiteConnectionNode()
+        self.ns.add_node_instance(con_node)
+        con_node.inputs["db_path"].value = self.test_db.name
+
+        rec_node = sql.RecordPoint()
+
+        rec_node.inputs["conn"].connect(con_node.outputs["connection"])
+        rec_node.inputs["value"].value = 4
+        rec_node.inputs["table"].value = "test"
+        rec_node.inputs["db_type"].value = "REAL"
+        await run_until_complete(con_node, rec_node)
+
+        d = {
+            "a": 1,
+            "b": "foo",
+            "c": {"d": 0.1},
+            "e": [0, 1, 2],
+        }
+        rec_node.inputs["value"].value = d
+
+        await run_until_complete(rec_node)
+
+        out = rec_node.outputs["record"].value
+
+        self.assertEqual(out, d)
+
 
 class TestSqlBuilder(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
