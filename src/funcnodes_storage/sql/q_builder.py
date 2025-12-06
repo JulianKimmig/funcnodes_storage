@@ -379,7 +379,7 @@ class SelectTable(fn.Node):
 
         query.table = table
         if conn is not None:
-            conn.validate_query(query)
+            await conn.validate_query(query)
 
         self.outputs["out_query"].value = query
 
