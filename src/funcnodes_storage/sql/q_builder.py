@@ -379,7 +379,7 @@ class SelectTable(fn.Node):
 
         query.table = table
         if conn is not None:
-            conn.validate_query(query)
+            await conn.validate_query(query)
 
         self.outputs["out_query"].value = query
 
@@ -490,8 +490,8 @@ async def execute_query(conn: AbstractConnectionManager, query: SQLQuery) -> Lis
     id="storage.sql.get_tables",
     name="Get Tables",
 )
-def get_tables(conn: AbstractConnectionManager) -> List[str]:
-    return conn.get_tables_names()
+async def get_tables(conn: AbstractConnectionManager) -> List[str]:
+    return await conn.get_tables_names()
 
 
 NODE_SHELF = fn.Shelf(

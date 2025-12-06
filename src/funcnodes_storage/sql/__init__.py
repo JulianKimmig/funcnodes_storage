@@ -1,5 +1,5 @@
 import aiosqlite
-from typing import Any, List, Literal, Optional
+from typing import Any, List, Literal, Optional, Union
 import json
 import funcnodes as fn
 from funcnodes_files import validate_path
@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import asyncio
 from dataclasses import dataclass
+from . import q_builder
 from .q_builder import (
     SQLQuery,
     NODE_SHELF as q_builder_shelf,
@@ -301,9 +302,21 @@ def _map_value(value: Any, db_type: Optional[_valid_fb_types_type]) -> tuple[str
         elif db_type == "BLOB":
             return "BLOB", value
         elif db_type == "ANY":
-            return "ANY", json.loads(json.dumps(value, cls=fn.JSONEncoder))
+            return "ANY", json.dumps(value, cls=fn.JSONEncoder)
         else:
             raise ValueError(f"Invalid db_type: {db_type}")
+
+
+def _decode_value(raw_value: Any, value_type: Optional[_valid_fb_types_type]):
+    """Reverse `_map_value` for persisted rows."""
+    if value_type in ("TEXT", "ANY"):
+        if isinstance(raw_value, (str, bytes)):
+            try:
+                return json.loads(raw_value, cls=fn.JSONDecoder)
+            except Exception:
+                return raw_value
+        return raw_value
+    return raw_value
 
 
 class DataRetrieve(fn.Node):
@@ -410,9 +423,7 @@ class DataRetrieve(fn.Node):
                     SQLResult(
                         id=row[0],
                         timestamp=row[1],
-                        value=_map_value(row[2], value_type)[1]
-                        if value_type
-                        else row[2],
+                        value=_decode_value(row[2], value_type),
                     )
                     for row in rows
                 ]
@@ -434,6 +445,7 @@ class DeleteData(fn.Node):
         type=ManagedSQLiteConnection,
         required=True,
         description="The SQLite database connection",
+        does_trigger=False,
     )
 
     table = fn.NodeInput(
@@ -441,18 +453,46 @@ class DeleteData(fn.Node):
         type=str,
         required=True,
         description="The table to delete from.",
+        does_trigger=False,
+    )
+
+    condition = fn.NodeInput(
+        id="condition",
+        type=Optional[Union[str, SQLQuery, q_builder.FilterQuery]],
+        required=False,
+        default=None,
+        description="Optional condition; if provided, only matching rows are deleted.",
+        does_trigger=False,
     )
 
     async def func(
-        self, conn: ManagedSQLiteConnection, table: str, condition: Optional[str] = None
+        self,
+        conn: ManagedSQLiteConnection,
+        table: str,
+        condition: Optional[Union[str, SQLQuery, q_builder.FilterQuery]] = None,
     ) -> None:
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table):
+            raise ValueError(
+                f"Invalid table name: {table}, must match ^[A-Za-z_][A-Za-z0-9_]*$"
+            )
+
+        if isinstance(condition, SQLQuery):
+            cond_sql = condition.filter.build() if condition.filter else None
+        elif isinstance(condition, q_builder.FilterQuery):
+            cond_sql = condition.build()
+        elif isinstance(condition, str):
+            cond_sql = condition
+        elif condition is None:
+            cond_sql = None
+        else:
+            raise ValueError(f"Unsupported condition type {type(condition)}")
+
         async with conn as db_conn:
             try:
-                # if condition:
-                #     query = f"DELETE FROM {table} WHERE {condition}"
-                # else:
-                #
-                query = f"DROP TABLE IF EXISTS {table}"
+                if cond_sql:
+                    query = f"DELETE FROM {table} WHERE {cond_sql}"
+                else:
+                    query = f"DROP TABLE IF EXISTS {table}"
                 await db_conn.execute(query)
                 await db_conn.commit()
             except aiosqlite.Error as e:
@@ -495,7 +535,7 @@ if fnpd:
 
 
 NODE_SHELF = fn.Shelf(
-    nodes=[SQLiteConnectionNode, RecordPoint, DataRetrieve, to_csv]
+    nodes=[SQLiteConnectionNode, RecordPoint, DataRetrieve, DeleteData, to_csv]
     + ([to_df] if fnpd else []),
     name="SQL Storage",
     description="Nodes for interacting with SQLite databases.",

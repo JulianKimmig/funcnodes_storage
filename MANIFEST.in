@@ -1,0 +1,4 @@
+graft src
+graft tests
+prune **/__pycache__/
+prune src/react_plugin*
