@@ -490,8 +490,8 @@ async def execute_query(conn: AbstractConnectionManager, query: SQLQuery) -> Lis
     id="storage.sql.get_tables",
     name="Get Tables",
 )
-def get_tables(conn: AbstractConnectionManager) -> List[str]:
-    return conn.get_tables_names()
+async def get_tables(conn: AbstractConnectionManager) -> List[str]:
+    return await conn.get_tables_names()
 
 
 NODE_SHELF = fn.Shelf(

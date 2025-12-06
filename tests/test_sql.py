@@ -113,6 +113,93 @@ async def test_data_retrevial(sqlite_env):
     assert len(retrieval_node.outputs["results"].value) == 7
 
 
+@pfn.nodetest([sql.SQLiteConnectionNode, sql.RecordPoint, sql.DataRetrieve])
+async def test_retrieve_dict_roundtrip(sqlite_env):
+    ns, _, conn_node = sqlite_env
+
+    rec_node = sql.RecordPoint()
+    ns.add_node_instance(rec_node)
+    rec_node.inputs["conn"].connect(conn_node.outputs["connection"])
+    rec_node.inputs["table"].value = "dict_table"
+
+    payload = {"a": 1, "b": "foo", "c": [1, 2, 3]}
+    rec_node.inputs["value"].value = payload
+
+    await run_until_complete(conn_node, rec_node)
+
+    retrieval_node = sql.DataRetrieve()
+    ns.add_node_instance(retrieval_node)
+    retrieval_node.inputs["conn"].connect(conn_node.outputs["connection"])
+    retrieval_node.inputs["table"].value = "dict_table"
+
+    await retrieval_node
+    results = retrieval_node.outputs["results"].value
+    assert len(results) == 1
+    assert results[0].value == payload
+
+
+@pfn.nodetest([sql.SQLiteConnectionNode, sql.RecordPoint, sql.DataRetrieve])
+async def test_retrieve_string_roundtrip(sqlite_env):
+    ns, _, conn_node = sqlite_env
+
+    rec_node = sql.RecordPoint()
+    ns.add_node_instance(rec_node)
+    rec_node.inputs["conn"].connect(conn_node.outputs["connection"])
+    rec_node.inputs["table"].value = "str_table"
+
+    rec_node.inputs["value"].value = "hello world"
+
+    await run_until_complete(conn_node, rec_node)
+
+    retrieval_node = sql.DataRetrieve()
+    ns.add_node_instance(retrieval_node)
+    retrieval_node.inputs["conn"].connect(conn_node.outputs["connection"])
+    retrieval_node.inputs["table"].value = "str_table"
+
+    await retrieval_node
+    results = retrieval_node.outputs["results"].value
+    assert len(results) == 1
+    assert results[0].value == "hello world"
+
+
+@pfn.nodetest([sql.SQLiteConnectionNode, sql.RecordPoint, sql.DeleteData])
+async def test_delete_data_condition(sqlite_env):
+    ns, _, conn_node = sqlite_env
+
+    rec_node = sql.RecordPoint()
+    ns.add_node_instance(rec_node)
+    rec_node.inputs["conn"].connect(conn_node.outputs["connection"])
+    rec_node.inputs["table"].value = "delete_cond"
+
+    await run_until_complete(conn_node, rec_node)
+    for i in range(5):
+        rec_node.inputs["value"].value = i
+        await rec_node
+
+    del_node = sql.DeleteData()
+    ns.add_node_instance(del_node)
+    del_node.inputs["conn"].connect(conn_node.outputs["connection"])
+    del_node.inputs["table"].value = "dp_delete_cond_INTEGER"
+
+    cond_node = q_builder.comparison_filter()
+    cond_node.inputs["column"].value = "value"
+    cond_node.inputs["operator"].value = ">="
+    cond_node.inputs["value"].value = 3
+
+    del_node.inputs["condition"].connect(cond_node.outputs["out"])
+
+    await run_until_complete(cond_node)
+    await del_node
+
+    # verify remaining rows are those < 3
+    async with aiosqlite.connect(sqlite_env[1]) as conn:
+        cursor = await conn.execute(
+            "SELECT value FROM dp_delete_cond_INTEGER ORDER BY value"
+        )
+        remaining = [row[0] for row in await cursor.fetchall()]
+        assert remaining == [0, 1, 2]
+
+
 @pfn.nodetest([sql.SQLiteConnectionNode, sql.RecordPoint, sql.DataRetrieve, sql.to_csv])
 async def test_to_csv(sqlite_env):
     ns, _, conn_node = sqlite_env
@@ -361,6 +448,37 @@ async def test_get_columns(sqlite_env):
 
     await node
     assert node.outputs["columns"].value == ["name", "age"]
+
+
+@pfn.nodetest(sql.DeleteData)
+async def test_delete_data(sqlite_env):
+    _, test_db, conn_node = sqlite_env
+
+    # create table via RecordPoint
+    rec_node = sql.RecordPoint()
+    rec_node.inputs["conn"].connect(conn_node.outputs["connection"])
+    rec_node.inputs["table"].value = "to_delete"
+    rec_node.inputs["value"].value = 1
+    await run_until_complete(rec_node)
+
+    # ensure table exists
+    async with aiosqlite.connect(test_db) as conn:
+        cursor = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='dp_to_delete_INTEGER'"
+        )
+        assert await cursor.fetchone() is not None
+
+    node = sql.DeleteData()
+    node.inputs["conn"].connect(conn_node.outputs["connection"])
+    node.inputs["table"].value = "dp_to_delete_INTEGER"
+
+    await node
+
+    async with aiosqlite.connect(test_db) as conn:
+        cursor = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='dp_to_delete_INTEGER'"
+        )
+        assert await cursor.fetchone() is None
 
 
 @pfn.nodetest([q_builder.execute_query, q_builder.SelectTable])
