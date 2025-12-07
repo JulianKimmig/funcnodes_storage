@@ -1,3 +1,9 @@
+## 0.3.0 (2025-12-07)
+
+### Feat
+
+- **sql**: add node to insert flattened dicts into sqlite tables
+
 ## 0.2.0 (2025-12-06)
 
 ### Feat
