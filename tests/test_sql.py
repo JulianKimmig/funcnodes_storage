@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import aiosqlite
 import pytest
@@ -8,6 +9,7 @@ import pytest_funcnodes as pfn
 from funcnodes_core import NodeSpace, run_until_complete
 from funcnodes_storage import sql
 from funcnodes_storage.sql import q_builder
+import funcnodes as fn
 
 try:
     import funcnodes_pandas as fnpd
@@ -37,7 +39,7 @@ async def sqlite_env(nodespace, files_dir):
     conn_node.inputs["db_path"].value = test_db.name
     await conn_node
 
-    yield nodespace, test_db, conn_node
+    yield test_db, conn_node
 
     if test_db.exists():
         try:
@@ -57,7 +59,7 @@ async def sqlite_env(nodespace, files_dir):
 
 @pfn.nodetest(sql.SQLiteConnectionNode)
 async def test_conn(sqlite_env):
-    _, _, conn_node = sqlite_env
+    _, conn_node = sqlite_env
     assert isinstance(
         conn_node.outputs["connection"].value, sql.ManagedSQLiteConnection
     )
@@ -65,9 +67,8 @@ async def test_conn(sqlite_env):
 
 @pfn.nodetest([sql.SQLiteConnectionNode, sql.RecordPoint])
 async def test_add_int(sqlite_env):
-    ns, test_db, conn_node = sqlite_env
+    test_db, conn_node = sqlite_env
     rec_node = sql.RecordPoint()
-    ns.add_node_instance(rec_node)
 
     rec_node.inputs["conn"].connect(conn_node.outputs["connection"])
     rec_node.inputs["value"].value = 5
@@ -91,10 +92,9 @@ async def test_add_int(sqlite_env):
 
 @pfn.nodetest([sql.SQLiteConnectionNode, sql.RecordPoint, sql.DataRetrieve])
 async def test_data_retrevial(sqlite_env):
-    ns, _, conn_node = sqlite_env
+    _, conn_node = sqlite_env
 
     rec_node = sql.RecordPoint()
-    ns.add_node_instance(rec_node)
     rec_node.inputs["conn"].connect(conn_node.outputs["connection"])
     rec_node.inputs["table"].value = "test"
 
@@ -105,7 +105,6 @@ async def test_data_retrevial(sqlite_env):
         await asyncio.sleep(0.1)
 
     retrieval_node = sql.DataRetrieve()
-    ns.add_node_instance(retrieval_node)
     retrieval_node.inputs["conn"].connect(conn_node.outputs["connection"])
     retrieval_node.inputs["table"].value = "test"
 
@@ -115,10 +114,9 @@ async def test_data_retrevial(sqlite_env):
 
 @pfn.nodetest([sql.SQLiteConnectionNode, sql.RecordPoint, sql.DataRetrieve])
 async def test_retrieve_dict_roundtrip(sqlite_env):
-    ns, _, conn_node = sqlite_env
+    _, conn_node = sqlite_env
 
     rec_node = sql.RecordPoint()
-    ns.add_node_instance(rec_node)
     rec_node.inputs["conn"].connect(conn_node.outputs["connection"])
     rec_node.inputs["table"].value = "dict_table"
 
@@ -128,7 +126,6 @@ async def test_retrieve_dict_roundtrip(sqlite_env):
     await run_until_complete(conn_node, rec_node)
 
     retrieval_node = sql.DataRetrieve()
-    ns.add_node_instance(retrieval_node)
     retrieval_node.inputs["conn"].connect(conn_node.outputs["connection"])
     retrieval_node.inputs["table"].value = "dict_table"
 
@@ -140,10 +137,9 @@ async def test_retrieve_dict_roundtrip(sqlite_env):
 
 @pfn.nodetest([sql.SQLiteConnectionNode, sql.RecordPoint, sql.DataRetrieve])
 async def test_retrieve_string_roundtrip(sqlite_env):
-    ns, _, conn_node = sqlite_env
+    test_db, conn_node = sqlite_env
 
     rec_node = sql.RecordPoint()
-    ns.add_node_instance(rec_node)
     rec_node.inputs["conn"].connect(conn_node.outputs["connection"])
     rec_node.inputs["table"].value = "str_table"
 
@@ -152,22 +148,31 @@ async def test_retrieve_string_roundtrip(sqlite_env):
     await run_until_complete(conn_node, rec_node)
 
     retrieval_node = sql.DataRetrieve()
-    ns.add_node_instance(retrieval_node)
     retrieval_node.inputs["conn"].connect(conn_node.outputs["connection"])
     retrieval_node.inputs["table"].value = "str_table"
+
+
 
     await retrieval_node
     results = retrieval_node.outputs["results"].value
     assert len(results) == 1
     assert results[0].value == "hello world"
 
+        # get raw value from table
+    async with aiosqlite.connect(test_db) as conn:
+        cursor = await conn.execute(
+            "SELECT value FROM dp_str_table_TEXT ORDER BY id DESC LIMIT 1"
+        )
+        raw_value = await cursor.fetchone()
+        assert raw_value is not None
+        assert raw_value[0] == "hello world"
+
 
 @pfn.nodetest([sql.SQLiteConnectionNode, sql.RecordPoint, sql.DeleteData])
 async def test_delete_data_condition(sqlite_env):
-    ns, _, conn_node = sqlite_env
+    test_db, conn_node = sqlite_env
 
     rec_node = sql.RecordPoint()
-    ns.add_node_instance(rec_node)
     rec_node.inputs["conn"].connect(conn_node.outputs["connection"])
     rec_node.inputs["table"].value = "delete_cond"
 
@@ -175,9 +180,18 @@ async def test_delete_data_condition(sqlite_env):
     for i in range(5):
         rec_node.inputs["value"].value = i
         await rec_node
+        assert rec_node.outputs["record"].value.value == i
+        assert rec_node.outputs["record"].value.timestamp is not None
+        assert rec_node.outputs["record"].value.id == i + 1
+    
+    # make sure table exists
+    async with aiosqlite.connect(test_db) as conn:
+        cursor = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='dp_delete_cond_INTEGER'"
+        )
+        assert await cursor.fetchone() is not None, f"Table dp_delete_cond_INTEGER does not exist, only found {await cursor.fetchall()}"
 
     del_node = sql.DeleteData()
-    ns.add_node_instance(del_node)
     del_node.inputs["conn"].connect(conn_node.outputs["connection"])
     del_node.inputs["table"].value = "dp_delete_cond_INTEGER"
 
@@ -192,7 +206,7 @@ async def test_delete_data_condition(sqlite_env):
     await del_node
 
     # verify remaining rows are those < 3
-    async with aiosqlite.connect(sqlite_env[1]) as conn:
+    async with aiosqlite.connect(test_db) as conn:
         cursor = await conn.execute(
             "SELECT value FROM dp_delete_cond_INTEGER ORDER BY value"
         )
@@ -202,10 +216,9 @@ async def test_delete_data_condition(sqlite_env):
 
 @pfn.nodetest([sql.SQLiteConnectionNode, sql.RecordPoint, sql.DataRetrieve, sql.to_csv])
 async def test_to_csv(sqlite_env):
-    ns, _, conn_node = sqlite_env
+    _, conn_node = sqlite_env
 
     rec_node = sql.RecordPoint()
-    ns.add_node_instance(rec_node)
     rec_node.inputs["conn"].connect(conn_node.outputs["connection"])
     rec_node.inputs["table"].value = "test"
 
@@ -216,12 +229,10 @@ async def test_to_csv(sqlite_env):
         await asyncio.sleep(0.1)
 
     retrieval_node = sql.DataRetrieve()
-    ns.add_node_instance(retrieval_node)
     retrieval_node.inputs["conn"].connect(conn_node.outputs["connection"])
     retrieval_node.inputs["table"].value = "test"
 
     to_csv_node = sql.to_csv()
-    ns.add_node_instance(to_csv_node)
     to_csv_node.inputs["results"].connect(retrieval_node.outputs["results"])
 
     await run_until_complete(retrieval_node, to_csv_node)
@@ -240,10 +251,9 @@ async def test_to_df(sqlite_env):
     if fnpd is None:
         pytest.skip("funcnodes_pandas not installed")
 
-    ns, _, conn_node = sqlite_env
+    _, conn_node = sqlite_env
 
     rec_node = sql.RecordPoint()
-    ns.add_node_instance(rec_node)
     rec_node.inputs["conn"].connect(conn_node.outputs["connection"])
     rec_node.inputs["table"].value = "test"
 
@@ -254,12 +264,10 @@ async def test_to_df(sqlite_env):
         await asyncio.sleep(0.1)
 
     retrieval_node = sql.DataRetrieve()
-    ns.add_node_instance(retrieval_node)
     retrieval_node.inputs["conn"].connect(conn_node.outputs["connection"])
     retrieval_node.inputs["table"].value = "test"
 
     to_df_node = sql.to_df()
-    ns.add_node_instance(to_df_node)
     to_df_node.inputs["results"].connect(retrieval_node.outputs["results"])
 
     await run_until_complete(retrieval_node, to_df_node)
@@ -273,9 +281,8 @@ async def test_to_df(sqlite_env):
 
 @pfn.nodetest([sql.SQLiteConnectionNode, sql.RecordPoint])
 async def test_add_float(sqlite_env):
-    ns, _, conn_node = sqlite_env
+    _, conn_node = sqlite_env
     rec_node = sql.RecordPoint()
-    ns.add_node_instance(rec_node)
 
     rec_node.inputs["conn"].connect(conn_node.outputs["connection"])
     rec_node.inputs["value"].value = 4
@@ -290,9 +297,8 @@ async def test_add_float(sqlite_env):
 
 @pfn.nodetest([sql.SQLiteConnectionNode, sql.RecordPoint])
 async def test_add_dict(sqlite_env):
-    ns, test_db, conn_node = sqlite_env
+    test_db, conn_node = sqlite_env
     rec_node = sql.RecordPoint()
-    ns.add_node_instance(rec_node)
 
     rec_node.inputs["conn"].connect(conn_node.outputs["connection"])
     rec_node.inputs["table"].value = "test"
@@ -318,17 +324,86 @@ async def test_add_dict(sqlite_env):
         assert any(name.startswith("dp_test_") for (name,) in tables)
 
 
+@pfn.nodetest([sql.SQLiteConnectionNode, sql.InsertFlatDict])
+async def test_insert_flat_dict_creates_columns(sqlite_env):
+    test_db, conn_node = sqlite_env
+
+    node = sql.InsertFlatDict()
+
+    node.inputs["conn"].connect(conn_node.outputs["connection"])
+    node.inputs["table"].value = "flat_table"
+    payload = {"user": {"name": "alice", "age": 30}, "meta": {"active": True}}
+    node.inputs["data"].value = payload
+
+    await run_until_complete(conn_node, node)
+
+    async with aiosqlite.connect(test_db) as conn:
+        cursor = await conn.execute("PRAGMA table_info(flat_table)")
+        columns = [row[1] for row in await cursor.fetchall()]
+
+        assert set(["user__name", "user__age", "meta__active"]).issubset(columns)
+
+        cursor = await conn.execute(
+            "SELECT user__name, user__age, meta__active FROM flat_table"
+        )
+        row = await cursor.fetchone()
+
+    assert json.loads(row[0]) == "alice"
+    assert json.loads(row[1]) == 30
+    assert json.loads(row[2]) is True
+
+
+@pfn.nodetest([sql.SQLiteConnectionNode, sql.InsertFlatDict])
+async def test_insert_flat_dict_adds_new_columns(sqlite_env):
+    test_db, conn_node = sqlite_env
+
+    node = sql.InsertFlatDict()
+    node.inputs["conn"].connect(conn_node.outputs["connection"])
+    node.inputs["table"].value = "flat_table"
+
+    node.inputs["data"].value = {"a": 1}
+    await run_until_complete(conn_node, node)
+
+    node.inputs["data"].value = {"a": 2, "b": 3}
+    await node
+
+    async with aiosqlite.connect(test_db) as conn:
+        cursor = await conn.execute("PRAGMA table_info(flat_table)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        assert set(["a", "b"]).issubset(columns)
+
+        cursor = await conn.execute("SELECT a, b FROM flat_table ORDER BY id")
+        rows = await cursor.fetchall()
+
+    assert [json.loads(r[0]) for r in rows] == [1, 2]
+    assert [json.loads(r[1]) if r[1] is not None else None for r in rows] == [None, 3]
+
+
+@pfn.nodetest([sql.SQLiteConnectionNode, sql.InsertFlatDict])
+async def test_insert_flat_dict_rejects_non_string_keys(sqlite_env):
+    _, conn_node = sqlite_env
+
+    node = sql.InsertFlatDict()
+    node.inputs["conn"].connect(conn_node.outputs["connection"])
+    node.inputs["table"].value = "flat_table"
+    node.inputs["data"].value = {1: "invalid"}
+
+    assert pfn.get_in_test(), "Not in test mode"
+
+    with pytest.raises(fn.NodeTriggerError):
+        await run_until_complete(conn_node, node)
+
+
 @pfn.nodetest(q_builder.SelectTable)
 async def test_select_table(sqlite_env):
-    ns, test_db, conn_node = sqlite_env
+    test_db, conn_node = sqlite_env
 
     # ensure table exists so validation passes
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute("CREATE TABLE IF NOT EXISTS test (id INTEGER)")
         await conn.commit()
 
-    node = q_builder.SelectTable()
-    ns.add_node_instance(node)
+    node = q_builder.SelectTable()  
 
     node.inputs["table"].value = "test"
     node.inputs["conn"].connect(conn_node.outputs["connection"])
@@ -423,7 +498,7 @@ async def test_in_filter():
 
 @pfn.nodetest(q_builder.get_tables)
 async def test_get_tables(sqlite_env):
-    _, test_db, conn_node = sqlite_env
+    test_db, conn_node = sqlite_env
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (name TEXT)")
         await conn.commit()
@@ -437,7 +512,7 @@ async def test_get_tables(sqlite_env):
 
 @pfn.nodetest(q_builder.GetColumns)
 async def test_get_columns(sqlite_env):
-    _, test_db, conn_node = sqlite_env
+    test_db, conn_node = sqlite_env
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute("CREATE TABLE test (name TEXT, age INT)")
         await conn.commit()
@@ -452,7 +527,7 @@ async def test_get_columns(sqlite_env):
 
 @pfn.nodetest(sql.DeleteData)
 async def test_delete_data(sqlite_env):
-    _, test_db, conn_node = sqlite_env
+    test_db, conn_node = sqlite_env
 
     # create table via RecordPoint
     rec_node = sql.RecordPoint()
@@ -483,7 +558,7 @@ async def test_delete_data(sqlite_env):
 
 @pfn.nodetest([q_builder.execute_query, q_builder.SelectTable])
 async def test_execute_query(sqlite_env):
-    _, test_db, conn_node = sqlite_env
+    test_db, conn_node = sqlite_env
     async with aiosqlite.connect(test_db) as conn:
         await conn.execute(
             "CREATE TABLE test (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INT)"
