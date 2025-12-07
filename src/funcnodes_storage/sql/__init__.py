@@ -116,6 +116,40 @@ class ManagedSQLiteConnection(AbstractConnectionManager):
         # return columns
 
 
+def _flatten_dict(payload: dict, parent_key: str = "",separator: str = "__") -> dict:
+    """
+    Flatten nested dictionaries using the separator as separator.
+    The default separator is ``__``.
+
+
+    Example:
+        {"a": {"b": 1}} -> {"a{separator}b": 1}
+
+    Raises ``TypeError`` if any key is not a ``str`` and ``ValueError`` if
+    duplicate flattened keys would occur.
+    """
+
+    if not isinstance(payload, dict):
+        raise TypeError("data must be a dictionary")
+
+    items = {}
+    for key, value in payload.items():
+        if not isinstance(key, str):
+            raise TypeError(f"All keys must be strings, got {type(key)!r}")
+        new_key = f"{parent_key}{separator}{key}" if parent_key else key
+        if isinstance(value, dict):
+            nested = _flatten_dict(value, new_key, separator)
+            for n_key, n_val in nested.items():
+                if n_key in items:
+                    raise ValueError(f"Duplicate key after flattening: {n_key}")
+                items[n_key] = n_val
+        else:
+            if new_key in items:
+                raise ValueError(f"Duplicate key after flattening: {new_key}")
+            items[new_key] = value
+    return items
+
+
 class SQLiteConnectionNode(fn.Node):
     node_id = "storage.sql.connection.async"
     node_name = "Async SQLite Connection"
@@ -263,9 +297,7 @@ class RecordPoint(fn.Node):
                     result = SQLResult(
                         id=row[0],
                         timestamp=row[1],
-                        value=json.loads(row[2], cls=fn.JSONDecoder)
-                        if value_type == "TEXT"
-                        else row[2],
+                        value=_decode_value(row[2], value_type),
                     )
                     self.outputs["record"].value = result
 
@@ -499,6 +531,107 @@ class DeleteData(fn.Node):
                 raise RuntimeError(f"Failed to delete data: {e}")
 
 
+class InsertFlatDict(fn.Node):
+    node_id = "storage.sql.insert_flat_dict"
+    node_name = "Insert Flat Dict"
+    description = (
+        "Flattens a dictionary using __ separators and inserts it into a table "
+        "where each flattened key becomes a column."
+    )
+
+    conn = fn.NodeInput(
+        id="conn",
+        type=ManagedSQLiteConnection,
+        required=True,
+        description="The SQLite database connection",
+        does_trigger=False,
+    )
+
+    table = fn.NodeInput(
+        id="table",
+        type=str,
+        required=True,
+        description="The destination table name",
+        does_trigger=False,
+    )
+
+    data = fn.NodeInput(
+        id="data",
+        type=dict,
+        required=True,
+        description="Dictionary to flatten and insert",
+    )
+
+    row_id = fn.NodeOutput(
+        id="row_id",
+        type=int,
+        description="Row id of the inserted record",
+    )
+
+    flat_dict = fn.NodeOutput(
+        id="flat_dict",
+        type=dict,
+        description="Flattened dictionary that was inserted",
+    )
+
+    async def func(self, conn: ManagedSQLiteConnection, table: str, data: dict):
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table):
+            raise ValueError(
+                f"Invalid table name: {table}, must match ^[A-Za-z_][A-Za-z0-9_]*$"
+            )
+
+        flat = _flatten_dict(data)
+        if not flat:
+            raise ValueError("Flattened dictionary is empty")
+
+        # ensure column names are safe
+        for key in flat.keys():
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+                raise ValueError(
+                    f"Invalid column name after flattening: {key}"
+                )
+
+        async with conn as db_conn:
+            # create table if needed with all columns
+            columns_sql = ", ".join([f'"{c}" TEXT' for c in flat.keys()])
+            create_sql = (
+                f'CREATE TABLE IF NOT EXISTS "{table}" '
+                f'(id INTEGER PRIMARY KEY AUTOINCREMENT, {columns_sql})'
+            )
+            await db_conn.execute(create_sql)
+
+            # ensure any newly appearing columns exist
+            async with db_conn.execute(f'PRAGMA table_info("{table}")') as cursor:
+                existing_columns = [row[1] for row in await cursor.fetchall()]
+
+            schema_changed = False
+            for col in flat.keys():
+                if col not in existing_columns:
+                    await db_conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{col}" TEXT')
+                    schema_changed = True
+
+            if schema_changed:
+                await db_conn.commit()
+
+            # insert data
+            column_list = ", ".join([f'"{c}"' for c in flat.keys()])
+            placeholders = ", ".join(["?"] * len(flat))
+            values = [json.dumps(v, cls=fn.JSONEncoder) for v in flat.values()]
+
+            await db_conn.execute(
+                f'INSERT INTO "{table}" ({column_list}) VALUES ({placeholders})',
+                values,
+            )
+            await db_conn.commit()
+
+            async with db_conn.execute("SELECT last_insert_rowid()") as cursor:
+                row = await cursor.fetchone()
+                row_id = row[0]
+
+        self.outputs["row_id"].value = row_id
+        self.outputs["flat_dict"].value = flat
+
+
 @fn.NodeDecorator(
     node_id="storage.sql.to_csv",
     node_name="To CSV",
@@ -535,7 +668,14 @@ if fnpd:
 
 
 NODE_SHELF = fn.Shelf(
-    nodes=[SQLiteConnectionNode, RecordPoint, DataRetrieve, DeleteData, to_csv]
+    nodes=[
+        SQLiteConnectionNode,
+        RecordPoint,
+        DataRetrieve,
+        DeleteData,
+        InsertFlatDict,
+        to_csv,
+    ]
     + ([to_df] if fnpd else []),
     name="SQL Storage",
     description="Nodes for interacting with SQLite databases.",
